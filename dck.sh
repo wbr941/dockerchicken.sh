@@ -61,7 +61,7 @@ while true; do
 					else
 						echo "开始下载并执行 sing-box 安装脚本..."
 						# 运行一键安装命令
-						bash <(curl -Ls https://raw.githubusercontent.com/wbr941/dockerchicken.sh/main/sing-box.sh)
+						bash <(curl -Ls https://raw.githubusercontent.com/eooce/sing-box/main/sing-box.sh)
 						echo "Sing-Box 安装脚本执行完成（若脚本有交互，则以脚本输出为准）。"
 					fi
 					read -p "按回车返回菜单..." _junk
