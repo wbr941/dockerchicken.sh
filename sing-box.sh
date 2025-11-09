@@ -11,111 +11,7 @@ export LANG=en_US.UTF-8
 re="\033[0m"
 red="\033[1;91m"
 green="\e[1;32m"
-yellow="\e[1;33m"
-purple="\e[1;35m"
-skyblue="\e[1;36m"
-red() { echo -e "\e[1;91m$1\033[0m"; }
-green() { echo -e "\e[1;32m$1\033[0m"; }
-yellow() { echo -e "\e[1;33m$1\033[0m"; }
-purple() { echo -e "\e[1;35m$1\033[0m"; }
-skyblue() { echo -e "\e[1;36m$1\033[0m"; }
-reading() { read -p "$(red "$1")" "$2"; }
-
-# 定义常量
-server_name="sing-box"
-work_dir="/etc/sing-box"
-config_dir="${work_dir}/config.json"
-client_dir="${work_dir}/url.txt"
-export vless_port=${PORT:-$(shuf -i 1000-65000 -n 1)}
-export CFIP=${CFIP:-'cf.877774.xyz'} 
-export CFPORT=${CFPORT:-'443'} 
-
-# 检查是否为root下运行
-[[ $EUID -ne 0 ]] && red "请在root用户下运行脚本" && exit 1
-
-# 检查命令是否存在函数
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
-
-# 检查服务状态通用函数
-check_service() {
-    local service_name=$1
-    local service_file=$2
-    
-    [[ ! -f "${service_file}" ]] && { red "not installed"; return 2; }
-        
-    if command_exists apk; then
-        rc-service "${service_name}" status | grep -q "started" && green "running" || yellow "not running"
-    else
-        systemctl is-active "${service_name}" | grep -q "^active$" && green "running" || yellow "not running"
-    fi
-    return $?
-}
-
-# 检查sing-box状态
-check_singbox() {
-    check_service "sing-box" "${work_dir}/${server_name}"
-}
-
-# 检查argo状态
-check_argo() {
-    check_service "argo" "${work_dir}/argo"
-}
-
-# 检查nginx状态
-check_nginx() {
-    command_exists nginx || { red "not installed"; return 2; }
-    check_service "nginx" "$(command -v nginx)"
-}
-
-#根据系统类型安装、卸载依赖
-manage_packages() {
-    if [ $# -lt 2 ]; then
-        red "Unspecified package name or action" 
-        return 1
-    fi
-
-    action=$1
-    shift
-
-    for package in "$@"; do
-        if [ "$action" == "install" ]; then
-            if command_exists "$package"; then
-                green "${package} already installed"
-                continue
-            fi
-            yellow "正在安装 ${package}..."
-            if command_exists apt; then
-                DEBIAN_FRONTEND=noninteractive apt install -y "$package"
-            elif command_exists dnf; then
-                dnf install -y "$package"
-            elif command_exists yum; then
-                yum install -y "$package"
-            elif command_exists apk; then
-                apk update
-                apk add "$package"
-            else
-                red "Unknown system!"
-                return 1
-            fi
-        elif [ "$action" == "uninstall" ]; then
-            if ! command_exists "$package"; then
-                yellow "${package} is not installed"
-                continue
-            fi
-            yellow "正在卸载 ${package}..."
-            if command_exists apt; then
-                apt remove -y "$package" && apt autoremove -y
-            elif command_exists dnf; then
-                dnf remove -y "$package" && dnf autoremove -y
-            elif command_exists yum; then
-                yum remove -y "$package" && yum autoremove -y
-            elif command_exists apk; then
-                apk del "$package"
-            else
-                red "Unknown system!"
-                return 1
+# nginx订阅配置（已移除）
             fi
         else
             red "Unknown action: $action"
@@ -174,112 +70,7 @@ allow_port() {
     }
 
     # 入站
-    for rule in "$@"; do
-        port=${rule%/*}
-        proto=${rule#*/}
-        [ "$has_ufw" -eq 1 ] && ufw allow in ${port}/${proto} >/dev/null 2>&1
-        [ "$has_firewalld" -eq 1 ] && firewall-cmd --permanent --add-port=${port}/${proto} >/dev/null 2>&1
-        [ "$has_iptables" -eq 1 ] && (iptables -C INPUT -p ${proto} --dport ${port} -j ACCEPT 2>/dev/null || iptables -I INPUT 4 -p ${proto} --dport ${port} -j ACCEPT)
-        [ "$has_ip6tables" -eq 1 ] && (ip6tables -C INPUT -p ${proto} --dport ${port} -j ACCEPT 2>/dev/null || ip6tables -I INPUT 4 -p ${proto} --dport ${port} -j ACCEPT)
-    done
-
-    [ "$has_firewalld" -eq 1 ] && firewall-cmd --reload >/dev/null 2>&1
-
-    # 规则持久化
-    if command_exists rc-service 2>/dev/null; then
-        [ "$has_iptables" -eq 1 ] && iptables-save > /etc/iptables/rules.v4 2>/dev/null
-        [ "$has_ip6tables" -eq 1 ] && ip6tables-save > /etc/iptables/rules.v6 2>/dev/null
-    else
-        if ! command_exists netfilter-persistent; then
-            manage_packages install iptables-persistent || yellow "请手动安装netfilter-persistent或保存iptables规则" 
-            netfilter-persistent save >/dev/null 2>&1
-        elif command_exists service; then
-            service iptables save 2>/dev/null
-            service ip6tables save 2>/dev/null
-        fi
-    fi
-}
-
-# 下载并安装 sing-box,cloudflared
-install_singbox() {
-    clear
-    purple "正在安装sing-box中，请稍后..."
-    # 判断系统架构
-    ARCH_RAW=$(uname -m)
-    case "${ARCH_RAW}" in
-        'x86_64') ARCH='amd64' ;;
-        'x86' | 'i686' | 'i386') ARCH='386' ;;
-        'aarch64' | 'arm64') ARCH='arm64' ;;
-        'armv7l') ARCH='armv7' ;;
-        's390x') ARCH='s390x' ;;
-        *) red "不支持的架构: ${ARCH_RAW}"; exit 1 ;;
-    esac
-
-    # 下载sing-box,cloudflared
-    [ ! -d "${work_dir}" ] && mkdir -p "${work_dir}" && chmod 777 "${work_dir}"
-    # latest_version=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases" | jq -r '[.[] | select(.prerelease==false)][0].tag_name | sub("^v"; "")')
-    # curl -sLo "${work_dir}/${server_name}.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/v${latest_version}/sing-box-${latest_version}-linux-${ARCH}.tar.gz"
-    # curl -sLo "${work_dir}/qrencode" "https://github.com/eooce/test/releases/download/${ARCH}/qrencode-linux-${ARCH}"
-    curl -sLo "${work_dir}/qrencode" "https://$ARCH.ssss.nyc.mn/qrencode"
-    curl -sLo "${work_dir}/sing-box" "https://$ARCH.ssss.nyc.mn/sbx"
-    curl -sLo "${work_dir}/argo" "https://$ARCH.ssss.nyc.mn/bot"
-    # tar -xzvf "${work_dir}/${server_name}.tar.gz" -C "${work_dir}/" && \
-    # mv "${work_dir}/sing-box-${latest_version}-linux-${ARCH}/sing-box" "${work_dir}/" && \
-    # rm -rf "${work_dir}/${server_name}.tar.gz" "${work_dir}/sing-box-${latest_version}-linux-${ARCH}"
-    chown root:root ${work_dir} && chmod +x ${work_dir}/${server_name} ${work_dir}/argo ${work_dir}/qrencode
-
-   # 生成随机端口和密码
-    nginx_port=$(($vless_port + 1)) 
-    tuic_port=$(($vless_port + 2))
-    hy2_port=$(($vless_port + 3)) 
-    uuid=$(cat /proc/sys/kernel/random/uuid)
-    password=$(< /dev/urandom tr -dc 'A-Za-z0-9' | head -c 24)
-    output=$(/etc/sing-box/sing-box generate reality-keypair)
-    private_key=$(echo "${output}" | awk '/PrivateKey:/ {print $2}')
-    public_key=$(echo "${output}" | awk '/PublicKey:/ {print $2}')
-
-    # 放行端口
-    allow_port $vless_port/tcp $nginx_port/tcp $tuic_port/udp $hy2_port/udp > /dev/null 2>&1
-
-    # 生成自签名证书
-    openssl ecparam -genkey -name prime256v1 -out "${work_dir}/private.key"
-    openssl req -new -x509 -days 3650 -key "${work_dir}/private.key" -out "${work_dir}/cert.pem" -subj "/CN=bing.com"
-    
-    # 检测网络类型并设置DNS策略
-    dns_strategy=$(ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1 && echo "prefer_ipv4" || (ping -c 1 -W 3 2001:4860:4860::8888 >/dev/null 2>&1 && echo "prefer_ipv6" || echo "prefer_ipv4"))
-
-   # 生成配置文件
-cat > "${config_dir}" << EOF
-{
-  "log": {
-    "disabled": false,
-    "level": "error",
-    "output": "$work_dir/sb.log",
-    "timestamp": true
-  },
-  "dns": {
-    "servers": [
-      {
-        "tag": "local",
-        "address": "local",
-        "strategy": "$dns_strategy"
-      }
-    ]
-  },
-  "ntp": {
-    "enabled": true,
-    "server": "time.apple.com",
-    "server_port": 123,
-    "interval": "30m"
-  },
-  "inbounds": [
-    {
-      "type": "vless",
-      "tag": "vless-reality",
-      "listen": "::",
-      "listen_port": $vless_port,
-      "users": [
-        {
+    # nginx订阅配置（已移除）
           "uuid": "$uuid",
           "flow": "xtls-rprx-vision"
         }
@@ -527,19 +318,9 @@ echo ""
 while IFS= read -r line; do echo -e "${purple}$line"; done < ${work_dir}/url.txt
 base64 -w0 ${work_dir}/url.txt > ${work_dir}/sub.txt
 chmod 644 ${work_dir}/sub.txt
-yellow "\n温馨提醒：需打开V2rayN或其他软件里的 "跳过证书验证"，或将节点的Insecure或TLS里设置为"true"\n"
-green "V2rayN,Shadowrocket,Nekobox,Loon,Karing,Sterisand订阅链接：http://${server_ip}:${nginx_port}/${password}\n"
-$work_dir/qrencode "http://${server_ip}:${nginx_port}/${password}"
-yellow "\n=========================================================================================="
-green "\n\nClash,Mihomo系列订阅链接：https://sublink.eooce.com/clash?config=http://${server_ip}:${nginx_port}/${password}\n"
-$work_dir/qrencode "https://sublink.eooce.com/clash?config=http://${server_ip}:${nginx_port}/${password}"
-yellow "\n=========================================================================================="
-green "\n\nSing-box订阅链接：https://sublink.eooce.com/singbox?config=http://${server_ip}:${nginx_port}/${password}\n"
-$work_dir/qrencode "https://sublink.eooce.com/singbox?config=http://${server_ip}:${nginx_port}/${password}"
-yellow "\n=========================================================================================="
-green "\n\nSurge订阅链接：https://sublink.eooce.com/surge?config=http://${server_ip}:${nginx_port}/${password}\n"
-$work_dir/qrencode "https://sublink.eooce.com/surge?config=http://${server_ip}:${nginx_port}/${password}"
-yellow "\n==========================================================================================\n"
+yellow "\n温馨提醒：需打开V2rayN或其他软件里的 \"跳过证书验证\"，或将节点的Insecure或TLS里设置为\"true\"\n"
+green "订阅文件已生成: ${work_dir}/sub.txt\n"
+green "（注意：已移除 nginx 支持，若需要 http 订阅请自行部署静态文件服务）\n"
 }
 
 # nginx订阅配置
@@ -810,18 +591,7 @@ uninstall_singbox() {
            rm -rf "${work_dir}" || true
            rm -rf "${log_dir}" || true
            rm -rf /etc/systemd/system/sing-box.service /etc/systemd/system/argo.service > /dev/null 2>&1
-           rm  -rf /etc/nginx/conf.d/sing-box.conf > /dev/null 2>&1
-           
-           # 卸载Nginx
-           reading "\n是否卸载 Nginx？${green}(卸载请输入 ${yellow}y${re} ${green}回车将跳过卸载Nginx) (y/n): ${re}" choice
-            case "${choice}" in
-                y|Y)
-                    manage_packages uninstall nginx
-                    ;;
-                 *) 
-                    yellow "取消卸载Nginx\n\n"
-                    ;;
-            esac
+           # nginx 相关文件与卸载交互已移除
 
             green "\nsing-box 卸载成功\n\n" && exit 0
            ;;
@@ -1097,104 +867,9 @@ EOF
 }
 
 disable_open_sub() {
-    local singbox_status=$(check_singbox 2>/dev/null)
-    local singbox_installed=$?
-    
-    if [ $singbox_installed -eq 2 ]; then
-        yellow "sing-box 尚未安装！"
-        sleep 1
-        menu
-        return
-    fi
-    
-    clear
-    echo ""
-    green "=== 管理节点订阅 ===\n"
-    skyblue "------------"
-    green "1. 关闭节点订阅"
-    skyblue "------------"
-    green "2. 开启节点订阅"
-    skyblue "------------"
-    green "3. 更换订阅端口"
-    skyblue "------------"
-    purple "0. 返回主菜单"
-    skyblue "------------"
-    reading "请输入选择: " choice
-    case "${choice}" in
-        1)
-            if command -v nginx &>/dev/null; then
-                if command_exists rc-service 2>/dev/null; then
-                    rc-service nginx status | grep -q "started" && rc-service nginx stop || red "nginx not running"
-                else 
-                    [ "$(systemctl is-active nginx)" = "active" ] && systemctl stop nginx || red "ngixn not running"
-                fi
-            else
-                yellow "Nginx is not installed"
-            fi
-
-            green "\n已关闭节点订阅\n"     
-            ;; 
-        2)
-            green "\n已开启节点订阅\n"
-            server_ip=$(get_realip)
-            password=$(tr -dc A-Za-z < /dev/urandom | head -c 32) 
-            sed -i "s|\(location = /\)[^ ]*|\1$password|" /etc/nginx/conf.d/sing-box.conf
-	    sub_port=$(port=$(grep -E 'listen [0-9]+;' "/etc/nginx/conf.d/sing-box.conf" | awk '{print $2}' | sed 's/;//'); if [ "$port" -eq 80 ]; then echo ""; else echo "$port"; fi)
-            start_nginx
-            (port=$(grep -E 'listen [0-9]+;' "/etc/nginx/conf.d/sing-box.conf" | awk '{print $2}' | sed 's/;//'); if [ "$port" -eq 80 ]; then echo ""; else green "订阅端口：$port"; fi); link=$(if [ -z "$sub_port" ]; then echo "http://$server_ip/$password"; else echo "http://$server_ip:$sub_port/$password"; fi); green "\n新的节点订阅链接：$link\n"
-            ;; 
-
-        3)
-            reading "请输入新的订阅端口(1-65535):" sub_port
-            [ -z "$sub_port" ] && sub_port=$(shuf -i 2000-65000 -n 1)
-            
-            # 检查端口是否被占用
-            until [[ -z $(lsof -iTCP:"$sub_port" -sTCP:LISTEN -t) ]]; do
-                if [[ -n $(lsof -iTCP:"$sub_port" -sTCP:LISTEN -t) ]]; then
-                    echo -e "${red}端口 $sub_port 已经被其他程序占用，请更换端口重试${re}"
-                    reading "请输入新的订阅端口(1-65535):" sub_port
-                    [[ -z $sub_port ]] && sub_port=$(shuf -i 2000-65000 -n 1)
-                fi
-            done
-
-            # 备份当前配置
-            if [ -f "/etc/nginx/conf.d/sing-box.conf" ]; then
-                cp "/etc/nginx/conf.d/sing-box.conf" "/etc/nginx/conf.d/sing-box.conf.bak.$(date +%Y%m%d)"
-            fi
-            
-            # 更新端口配置
-            sed -i 's/listen [0-9]\+;/listen '$sub_port';/g' "/etc/nginx/conf.d/sing-box.conf"
-            sed -i 's/listen \[::\]:[0-9]\+;/listen [::]:'$sub_port';/g' "/etc/nginx/conf.d/sing-box.conf"
-            path=$(sed -n 's|.*location = /\([^ ]*\).*|\1|p' "/etc/nginx/conf.d/sing-box.conf")
-            server_ip=$(get_realip)
-            
-            # 放行新端口
-            allow_port $sub_port/tcp > /dev/null 2>&1
-            
-            # 测试nginx配置
-            if nginx -t > /dev/null 2>&1; then
-                # 尝试重新加载配置
-                if nginx -s reload > /dev/null 2>&1; then
-                    green "nginx配置已重新加载，端口更换成功"
-                else
-                    yellow "配置重新加载失败，尝试重启nginx服务..."
-                    restart_nginx
-                fi
-                green "\n订阅端口更换成功\n"
-                green "新的订阅链接为：http://$server_ip:$sub_port/$path\n"
-            else
-                red "nginx配置测试失败，正在恢复原有配置..."
-                if [ -f "/etc/nginx/conf.d/sing-box.conf.bak."* ]; then
-                    latest_backup=$(ls -t /etc/nginx/conf.d/sing-box.conf.bak.* | head -1)
-                    cp "$latest_backup" "/etc/nginx/conf.d/sing-box.conf"
-                    yellow "已恢复原有nginx配置"
-                fi
-                return 1
-            fi
-            ;; 
-        0)  menu ;; 
-        *)  red "无效的选项！" ;;
-    esac
+    yellow "已移除 nginx/订阅管理功能，无法管理订阅。\n"
+    sleep 1
+    menu
 }
 
 # singbox 管理
@@ -1457,19 +1132,17 @@ purple "$new_vmess_url\n"
 
 # 主菜单
 menu() {
-   singbox_status=$(check_singbox 2>/dev/null)
-   nginx_status=$(check_nginx 2>/dev/null)
-   argo_status=$(check_argo 2>/dev/null)
+    singbox_status=$(check_singbox 2>/dev/null)
+    argo_status=$(check_argo 2>/dev/null)
    
-   clear
-   echo ""
-   green "Telegram群组: ${purple}https://t.me/eooceu${re}"
-   green "YouTube频道: ${purple}https://youtube.com/@eooce${re}"
-   green "Github地址: ${purple}https://github.com/eooce/sing-box${re}\n"
-   purple "=== 老王sing-box四合一安装脚本 ===\n"
-   purple "---Argo 状态: ${argo_status}"   
-   purple "--Nginx 状态: ${nginx_status}"
-   purple "singbox 状态: ${singbox_status}\n"
+    clear
+    echo ""
+    green "Telegram群组: ${purple}https://t.me/eooceu${re}"
+    green "YouTube频道: ${purple}https://youtube.com/@eooce${re}"
+    green "Github地址: ${purple}https://github.com/eooce/sing-box${re}\n"
+    purple "=== 老王sing-box四合一安装脚本 ===\n"
+    purple "---Argo 状态: ${argo_status}"   
+    purple "singbox 状态: ${singbox_status}\n"
    green "1. 安装sing-box"
    red "2. 卸载sing-box"
    echo "==============="
@@ -1500,7 +1173,7 @@ while true; do
             if [ ${check_singbox} -eq 0 ]; then
                 yellow "sing-box 已经安装！\n"
             else
-                manage_packages install nginx jq tar openssl lsof coreutils
+                manage_packages install jq tar openssl lsof coreutils
                 install_singbox
                 if command_exists systemctl; then
                     main_systemd_services
@@ -1516,7 +1189,6 @@ while true; do
 
                 sleep 5
                 get_info
-                add_nginx_conf
                 create_shortcut
             fi
            ;;
